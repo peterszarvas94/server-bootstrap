@@ -136,6 +136,30 @@ fi
 BASHRC_SNIPPET
 fi
 
+echo "[MOTD] Removing Ubuntu's standard login messages..."
+for motd_script in \
+  00-header \
+  10-help-text \
+  50-landscape-sysinfo \
+  50-motd-news \
+  80-esm \
+  88-esm-announce \
+  85-fwupd \
+  90-updates-available \
+  91-contract-ua \
+  95-hwe-eol \
+  98-reboot-required
+do
+  if [ -f "/etc/update-motd.d/$motd_script" ]; then
+    chmod a-x "/etc/update-motd.d/$motd_script"
+  fi
+done
+
+# The empty dynamic MOTD file otherwise produces one blank line before .bashrc.
+if grep -Eq '^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_motd\.so[[:space:]]+motd=/run/motd\.dynamic' /etc/pam.d/sshd; then
+  sed -i -E '/^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_motd\.so[[:space:]]+motd=\/run\/motd\.dynamic/ s/^/# Disabled by server bootstrap: /' /etc/pam.d/sshd
+fi
+
 echo "[SSH] Hardening SSH configuration..."
 install -d -m 755 /etc/ssh/sshd_config.d
 cat >/etc/ssh/sshd_config.d/99-hardening.conf <<SSHCONF
@@ -144,6 +168,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 ChallengeResponseAuthentication no
+PrintLastLog no
 UsePAM yes
 SSHCONF
 
