@@ -1,32 +1,23 @@
 # Server Bootstrap
 
-This repository contains scripts to bootstrap a new server.
+Non-interactive bootstrap script for a clean Ubuntu server. It creates an
+admin user, installs common tools, configures SSH and UFW, optionally installs
+Tailscale, and installs the machine report shown on interactive login.
 
-A patched version of the [USGC Machine Report](https://github.com/usgraphics/usgc-machine-report/) is also included.
+## Requirements
+
+- A clean Ubuntu server
+- SSH access as `root`
+- Root's `/root/.ssh/authorized_keys` must exist
+- The new admin username must not already exist
+
+The script is not intended for already configured or partially configured
+servers.
 
 ## Usage
 
 ```bash
 chmod +x secure_server_bootstrap.sh
-./secure_server_bootstrap.sh
-```
-
-All arguments are required, so the script is non-interactive. Use `--user=root`;
-the script is intended for clean Ubuntu servers only. The new admin user must
-not already exist. Tailscale is optional: use `--tailscale=false` to skip it,
-or provide an auth key directly.
-It disables password authentication for SSH and allows the new admin user to log in using root's existing authorized key.
-It keeps the last-login information inside the machine report while disabling Ubuntu's standard MOTD and SSH/PAM's separate `Last login` line.
-
-The script also repairs interrupted package configuration and preselects the
-root disk for `grub-pc`, which avoids an interactive GRUB prompt on VPS images.
-
-Create a Tailscale auth key here:
-[Tailscale admin keys](https://login.tailscale.com/admin/settings/keys)
-
-Example:
-
-```bash
 ./secure_server_bootstrap.sh \
   --host=203.0.113.10 \
   --user=root \
@@ -35,65 +26,43 @@ Example:
   --tailscale=tskey-auth-your-key
 ```
 
-To skip Tailscale setup:
+Required options:
 
-```bash
-./secure_server_bootstrap.sh \
-  --host=203.0.113.10 \
-  --user=root \
-  --new-user=peti \
-  --hostname=server-1 \
-  --tailscale=false
-```
+- `--host=HOST`: server IP or DNS name
+- `--user=root`: SSH user; must be `root`
+- `--new-user=USERNAME`: admin user to create
+- `--hostname=NAME`: hostname to assign to the server
+- `--tailscale=false|AUTH_KEY`: skip Tailscale or connect using an auth key
 
-The auth key is passed on the command line, so it may be visible in shell
-history or process listings. Use an appropriately scoped, short-lived key.
+Optional:
 
-## Apply MOTD Fix Once
+- `--ssh-port=PORT`: SSH port, defaults to `22`
+- `--help`: show usage
 
-For a server that was already bootstrapped, run this once from your local machine:
+Create a Tailscale auth key at:
+<https://login.tailscale.com/admin/settings/keys>
 
-```bash
-ssh peti@peterszarvas.hu 'sudo bash -s' <<'EOF'
-set -eu
+The auth key is passed on the command line and may appear in shell history or
+process listings. Use a short-lived, appropriately scoped key.
 
-for motd_script in \
-  00-header \
-  10-help-text \
-  50-landscape-sysinfo \
-  50-motd-news \
-  80-esm \
-  88-esm-announce \
-  85-fwupd \
-  90-updates-available \
-  91-contract-ua \
-  95-hwe-eol \
-  98-reboot-required
-do
-  if [ -f "/etc/update-motd.d/$motd_script" ]; then
-    chmod a-x "/etc/update-motd.d/$motd_script"
-  fi
-done
+## What It Configures
 
-if grep -Eq '^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_motd\.so[[:space:]]+motd=/run/motd\.dynamic' /etc/pam.d/sshd; then
-  sed -i -E '/^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_motd\.so[[:space:]]+motd=\/run\/motd\.dynamic/ s/^/# Disabled by server bootstrap: /' /etc/pam.d/sshd
-fi
+- Disables root SSH login and password authentication
+- Creates the admin user with root's authorized SSH key
+- Enables passwordless sudo and Docker access for the admin user
+- Installs Docker, Compose, UFW, Fail2ban, Git, curl, mise, and `lastlog2`
+- Sets the system hostname
+- Installs the machine report at `/usr/local/bin/machine_report.sh` and in the admin user's home directory
+- Removes Ubuntu's standard MOTD and separate SSH `Last login` output
+- Allows incoming TCP ports `22`, `80`, and `443`
+- If Tailscale is enabled, allows SSH through `tailscale0` as well
 
-if grep -Eq '^[[:space:]]*session[[:space:]]+.*pam_lastlog\.so' /etc/pam.d/sshd; then
-  sed -i -E '/^[[:space:]]*session[[:space:]]+.*pam_lastlog\.so/ s/^/# Disabled by server bootstrap: /' /etc/pam.d/sshd
-fi
+## SSH Host Keys
 
-install -d -m 755 /etc/ssh/sshd_config.d
-printf '%s\n' 'PrintLastLog no' >/etc/ssh/sshd_config.d/98-no-last-login.conf
-sshd -t
-systemctl reload "$(systemctl is-active --quiet ssh && printf ssh || printf sshd)"
-EOF
-```
-
-This does not modify `/home/peti/.machine_report.sh`; it will continue to run from `.bashrc` on interactive SSH sessions.
+The script removes stale local `known_hosts` entries for the supplied host and
+hostname before connecting. A newly generated server host key is accepted on
+the first connection.
 
 ## License
 
-MIT
-
-Original license (BSD 3-Clause) also included for machine report.
+MIT. The included machine report retains its original BSD 3-Clause license.
