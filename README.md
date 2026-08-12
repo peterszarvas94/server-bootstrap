@@ -11,9 +11,43 @@ chmod +x secure_server_bootstrap.sh
 ./secure_server_bootstrap.sh
 ```
 
-The script will prompt for server IP/hostname, and new admin username.
-It will disable password authentication for SSH, and only allow the new admin user to login via SSH key.
-It keeps the login machine report while disabling Ubuntu's standard MOTD and the `Last login` line.
+All arguments are required, so the script is non-interactive. Use `--user=root`;
+the script is intended for clean Ubuntu servers only. The new admin user must
+not already exist. Tailscale is optional: use `--tailscale=false` to skip it,
+or provide an auth key directly.
+It disables password authentication for SSH and allows the new admin user to log in using root's existing authorized key.
+It keeps the last-login information inside the machine report while disabling Ubuntu's standard MOTD and SSH/PAM's separate `Last login` line.
+
+The script also repairs interrupted package configuration and preselects the
+root disk for `grub-pc`, which avoids an interactive GRUB prompt on VPS images.
+
+Create a Tailscale auth key here:
+[Tailscale admin keys](https://login.tailscale.com/admin/settings/keys)
+
+Example:
+
+```bash
+./secure_server_bootstrap.sh \
+  --host=203.0.113.10 \
+  --user=root \
+  --new-user=peti \
+  --hostname=server-1 \
+  --tailscale=tskey-auth-your-key
+```
+
+To skip Tailscale setup:
+
+```bash
+./secure_server_bootstrap.sh \
+  --host=203.0.113.10 \
+  --user=root \
+  --new-user=peti \
+  --hostname=server-1 \
+  --tailscale=false
+```
+
+The auth key is passed on the command line, so it may be visible in shell
+history or process listings. Use an appropriately scoped, short-lived key.
 
 ## Apply MOTD Fix Once
 
@@ -43,6 +77,10 @@ done
 
 if grep -Eq '^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_motd\.so[[:space:]]+motd=/run/motd\.dynamic' /etc/pam.d/sshd; then
   sed -i -E '/^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_motd\.so[[:space:]]+motd=\/run\/motd\.dynamic/ s/^/# Disabled by server bootstrap: /' /etc/pam.d/sshd
+fi
+
+if grep -Eq '^[[:space:]]*session[[:space:]]+.*pam_lastlog\.so' /etc/pam.d/sshd; then
+  sed -i -E '/^[[:space:]]*session[[:space:]]+.*pam_lastlog\.so/ s/^/# Disabled by server bootstrap: /' /etc/pam.d/sshd
 fi
 
 install -d -m 755 /etc/ssh/sshd_config.d

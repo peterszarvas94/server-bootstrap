@@ -2,31 +2,100 @@
 set -euo pipefail
 
 # One-shot server hardening bootstrap.
-# Run from your local machine. It connects as root (password prompt via SSH),
-# creates an admin user using the existing root authorized_keys, then hardens
-# SSH + firewall.
+# Run from your local machine against a clean Ubuntu server. It connects as
+# root, creates an admin user using root's authorized_keys, then hardens SSH
+# and the firewall.
 
-HOST="${HOST:-}"
-SSH_PORT="${SSH_PORT:-22}"
-ADMIN_USER="${ADMIN_USER:-}"
+HOST=""
+SSH_USER=""
+ADMIN_USER=""
+SSH_PORT="22"
+TARGET_HOSTNAME=""
+TAILSCALE_SETUP=""
+TAILSCALE_AUTH_KEY=""
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 MACHINE_REPORT_SCRIPT_PATH="$SCRIPT_DIR/machine_report.sh"
 
-if [ -z "$HOST" ]; then
-  read -r -p "Server host (IP or DNS): " HOST
-fi
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./secure_server_bootstrap.sh --host=HOST --user=root
+                              --new-user=USERNAME --hostname=HOSTNAME
+                              --tailscale=false|AUTH_KEY [--ssh-port=PORT]
 
-if [ -z "$ADMIN_USER" ]; then
-  read -r -p "New admin username: " ADMIN_USER
-fi
+Examples:
+  ./secure_server_bootstrap.sh --host=203.0.113.10 --user=root \
+    --new-user=peti --hostname=server-1 --tailscale=false
+  ./secure_server_bootstrap.sh --host=203.0.113.10 --user=root \
+    --new-user=peti --hostname=server-1 --tailscale=tskey-auth-...
+USAGE
+}
 
-if [ -z "$HOST" ]; then
-  echo "Host is required." >&2
+for arg in "$@"; do
+  case "$arg" in
+    --host=*)
+      HOST="${arg#*=}"
+      ;;
+    --user=*)
+      SSH_USER="${arg#*=}"
+      ;;
+    --new-user=*)
+      ADMIN_USER="${arg#*=}"
+      ;;
+    --hostname=*)
+      TARGET_HOSTNAME="${arg#*=}"
+      ;;
+    --ssh-port=*)
+      SSH_PORT="${arg#*=}"
+      ;;
+    --tailscale=false|--tailscale=0|--tailscale=no)
+      TAILSCALE_SETUP="no"
+      TAILSCALE_AUTH_KEY=""
+      ;;
+    --tailscale=*)
+      TAILSCALE_SETUP="yes"
+      TAILSCALE_AUTH_KEY="${arg#*=}"
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ -z "$HOST" ] || [ -z "$SSH_USER" ] || [ -z "$ADMIN_USER" ] || [ -z "$TARGET_HOSTNAME" ] || [ -z "$TAILSCALE_SETUP" ]; then
+  echo "Required arguments: --host, --user, --new-user, --hostname, and --tailscale." >&2
+  usage >&2
   exit 1
 fi
 
-if [ -z "$ADMIN_USER" ]; then
-  echo "Admin username is required." >&2
+if [ "$SSH_USER" != "root" ]; then
+  echo "--user must be root. This script only supports clean servers." >&2
+  exit 1
+fi
+
+if [ "$TAILSCALE_SETUP" = "yes" ] && [ -z "$TAILSCALE_AUTH_KEY" ]; then
+  echo "--tailscale requires an auth key or false." >&2
+  exit 1
+fi
+
+if [[ ! "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || [[ ! "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+  echo "Usernames may contain only lowercase letters, digits, underscores, and hyphens." >&2
+  exit 1
+fi
+
+if [[ ! "$TARGET_HOSTNAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]; then
+  echo "Invalid hostname: $TARGET_HOSTNAME" >&2
+  exit 1
+fi
+
+if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
+  echo "Invalid SSH port: $SSH_PORT" >&2
   exit 1
 fi
 
@@ -36,28 +105,55 @@ if [ ! -f "$MACHINE_REPORT_SCRIPT_PATH" ]; then
 fi
 
 MACHINE_REPORT_SCRIPT_B64="$(base64 -w 0 "$MACHINE_REPORT_SCRIPT_PATH")"
+TAILSCALE_AUTH_KEY_B64="$(printf '%s' "$TAILSCALE_AUTH_KEY" | base64 -w 0)"
 
-echo "[1/4] Connecting as root on $HOST:$SSH_PORT (you may be asked for root password)..."
+echo "[1/4] Connecting as root on $HOST:$SSH_PORT..."
 
-ssh -p "$SSH_PORT" root@"$HOST" \
+SSH_OPTIONS=(-o StrictHostKeyChecking=accept-new)
+
+remove_known_hosts_entries() {
+  for ssh_host in "$HOST" "$TARGET_HOSTNAME"; do
+    ssh-keygen -q -R "$ssh_host" >/dev/null 2>&1 || true
+    ssh-keygen -q -R "[$ssh_host]:$SSH_PORT" >/dev/null 2>&1 || true
+  done
+}
+
+# Remove stale keys after a rebuild or IP reassignment. SSH still verifies a
+# newly received key after these entries are removed.
+remove_known_hosts_entries
+
+ssh "${SSH_OPTIONS[@]}" -p "$SSH_PORT" "$SSH_USER@$HOST" \
   ADMIN_USER="$ADMIN_USER" \
   SSH_PORT="$SSH_PORT" \
+  TARGET_HOSTNAME="$TARGET_HOSTNAME" \
+  TAILSCALE_SETUP="$TAILSCALE_SETUP" \
+  TAILSCALE_AUTH_KEY_B64="$TAILSCALE_AUTH_KEY_B64" \
   MACHINE_REPORT_SCRIPT_B64="$MACHINE_REPORT_SCRIPT_B64" \
   'bash -s' <<'EOF'
 set -euo pipefail
 
 echo "[Preflight] Checking SSH prerequisites..."
 
-# Verify SSH service is running
-if ! systemctl is-active --quiet ssh && ! systemctl is-active --quiet sshd; then
+# Detect the active SSH service. Checking the unit directly also works when
+# systemd does not include the unit in `list-units` output.
+if systemctl is-active --quiet ssh; then
+  SSH_SERVICE="ssh"
+elif systemctl is-active --quiet sshd; then
+  SSH_SERVICE="sshd"
+else
   echo "ERROR: SSH service is not running" >&2
   exit 1
 fi
 
-# Check for root's authorized_keys before making any changes
+# Check for root's authorized_keys before making changes.
 if [ ! -f /root/.ssh/authorized_keys ]; then
   echo "ERROR: /root/.ssh/authorized_keys does not exist" >&2
-  echo "Cannot copy SSH keys to new admin user. Aborting." >&2
+  echo "Cannot copy SSH keys to the new admin user. Aborting." >&2
+  exit 1
+fi
+
+if id -u "$ADMIN_USER" >/dev/null 2>&1; then
+  echo "ERROR: User '$ADMIN_USER' already exists. This script only supports clean servers." >&2
   exit 1
 fi
 
@@ -65,24 +161,53 @@ fi
 mkdir -p /run/sshd
 chmod 755 /run/sshd
 
-# Detect SSH service name
-if systemctl list-units --type=service | grep -q 'sshd.service'; then
-  SSH_SERVICE="sshd"
-elif systemctl list-units --type=service | grep -q 'ssh.service'; then
-  SSH_SERVICE="ssh"
-else
-  echo "ERROR: Cannot detect SSH service name (tried 'ssh' and 'sshd')" >&2
-  exit 1
-fi
-
 echo "[Preflight] SSH service detected: $SSH_SERVICE"
 echo "[Preflight] All checks passed, proceeding with bootstrap..."
 
+echo "[Hostname] Setting hostname to $TARGET_HOSTNAME..."
+hostnamectl set-hostname "$TARGET_HOSTNAME"
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+
+# Some VPS images leave grub-pc unpacked but unconfigured. Preselect the
+# device containing / so dpkg can finish without an interactive boot-device
+# prompt.
+ROOT_SOURCE="$(findmnt -n -o SOURCE /)"
+ROOT_DISK=""
+if command -v lsblk >/dev/null 2>&1; then
+  while read -r parent; do
+    ROOT_DISK="/dev/$parent"
+    break
+  done < <(lsblk -no PKNAME "$ROOT_SOURCE" 2>/dev/null)
+fi
+if [ -z "$ROOT_DISK" ] && [[ "$ROOT_SOURCE" == /dev/* ]]; then
+  ROOT_DISK="$ROOT_SOURCE"
+fi
+if [ -n "$ROOT_DISK" ] && command -v debconf-set-selections >/dev/null 2>&1; then
+  printf '%s\n' \
+    "grub-pc grub-pc/install_devices multiselect $ROOT_DISK" \
+    'grub-pc grub-pc/install_devices_empty boolean false' | debconf-set-selections
+fi
+dpkg --configure -a || apt-get -f install -y
+apt-get -f install -y
 apt-get -y upgrade
-apt-get install -y sudo ufw fail2ban docker.io docker-compose-v2 curl git
+apt-get install -y sudo ufw fail2ban docker.io docker-compose-v2 curl git lastlog2
 systemctl enable --now docker
+
+if [ "$TAILSCALE_SETUP" = "yes" ]; then
+  echo "[Tailscale] Installing and configuring Tailscale..."
+  if ! command -v tailscale >/dev/null 2>&1; then
+    curl -fsSL https://tailscale.com/install.sh | sh
+  fi
+  systemctl enable --now tailscaled
+  if ! tailscale ip -4 >/dev/null 2>&1; then
+    TAILSCALE_AUTH_KEY="$(printf '%s' "$TAILSCALE_AUTH_KEY_B64" | base64 -d)"
+    tailscale up --auth-key="$TAILSCALE_AUTH_KEY"
+    unset TAILSCALE_AUTH_KEY
+  fi
+  echo "[Tailscale] Connected with address: $(tailscale ip -4)"
+fi
 
 if ! command -v mise >/dev/null 2>&1; then
   curl https://mise.run | sh
@@ -91,9 +216,7 @@ if ! command -v mise >/dev/null 2>&1; then
   fi
 fi
 
-if ! id -u "$ADMIN_USER" >/dev/null 2>&1; then
-  useradd -m -s /bin/bash "$ADMIN_USER"
-fi
+useradd -m -s /bin/bash "$ADMIN_USER"
 
 usermod -aG sudo "$ADMIN_USER"
 usermod -aG docker "$ADMIN_USER"
@@ -106,7 +229,7 @@ touch "/home/$ADMIN_USER/.ssh/authorized_keys"
 chown "$ADMIN_USER:$ADMIN_USER" "/home/$ADMIN_USER/.ssh/authorized_keys"
 chmod 600 "/home/$ADMIN_USER/.ssh/authorized_keys"
 
-# Copy root's authorized_keys (already verified it exists in preflight)
+# Copy root's authorized_keys (already verified it exists).
 cat /root/.ssh/authorized_keys >> "/home/$ADMIN_USER/.ssh/authorized_keys"
 sort -u "/home/$ADMIN_USER/.ssh/authorized_keys" -o "/home/$ADMIN_USER/.ssh/authorized_keys"
 
@@ -160,6 +283,12 @@ if grep -Eq '^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_motd\.so[[:
   sed -i -E '/^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_motd\.so[[:space:]]+motd=\/run\/motd\.dynamic/ s/^/# Disabled by server bootstrap: /' /etc/pam.d/sshd
 fi
 
+# Do not print SSH/PAM's separate "Last login" line. The machine report still
+# displays the last-login data inside its own report when available.
+if grep -Eq '^[[:space:]]*session[[:space:]]+.*pam_lastlog\.so' /etc/pam.d/sshd; then
+  sed -i -E '/^[[:space:]]*session[[:space:]]+.*pam_lastlog\.so/ s/^/# Disabled by server bootstrap: /' /etc/pam.d/sshd
+fi
+
 echo "[SSH] Hardening SSH configuration..."
 install -d -m 755 /etc/ssh/sshd_config.d
 cat >/etc/ssh/sshd_config.d/99-hardening.conf <<SSHCONF
@@ -184,14 +313,18 @@ if ! sshd -t 2>/dev/null; then
   exit 1
 fi
 
-# Reload SSH service (using detected service name)
+# Reload SSH service (using detected service name). Package installation may
+# have stopped the service after the preflight check, so start it if needed.
 echo "[SSH] Reloading SSH service..."
-systemctl reload "$SSH_SERVICE"
+systemctl reload-or-restart "$SSH_SERVICE"
 
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow "$SSH_PORT"/tcp
+if [ "$TAILSCALE_SETUP" = "yes" ]; then
+  ufw allow in on tailscale0 to any port "$SSH_PORT" proto tcp
+fi
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
@@ -207,14 +340,17 @@ echo "[2/4] Server is rebooting to apply all changes..."
 echo "Waiting 30 seconds for server to restart..."
 sleep 30
 
+# Package upgrades or a rebuilt image may have generated a new host key.
+remove_known_hosts_entries
+
 echo "[3/4] Verifying SSH access as '$ADMIN_USER'..."
-if ! ssh -o BatchMode=yes -o ConnectTimeout=10 -p "$SSH_PORT" "$ADMIN_USER@$HOST" "whoami" >/dev/null 2>&1; then
+if ! ssh "${SSH_OPTIONS[@]}" -o BatchMode=yes -o ConnectTimeout=10 -p "$SSH_PORT" "$ADMIN_USER@$HOST" "whoami" >/dev/null 2>&1; then
   echo "Failed to verify SSH login for $ADMIN_USER. Check key/agent and try: ssh -p $SSH_PORT $ADMIN_USER@$HOST" >&2
   exit 1
 fi
 
 echo "[4/4] Verifying root SSH is blocked..."
-if ssh -o BatchMode=yes -o ConnectTimeout=8 -p "$SSH_PORT" root@"$HOST" "whoami" >/dev/null 2>&1; then
+if ssh "${SSH_OPTIONS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$SSH_PORT" root@"$HOST" "whoami" >/dev/null 2>&1; then
   echo "WARNING: root SSH still appears enabled. Check /etc/ssh/sshd_config.d/99-hardening.conf" >&2
 else
   echo "Root SSH is blocked (expected)."

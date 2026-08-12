@@ -306,14 +306,27 @@ else
     disk_percent=$(awk -v used="$root_used" -v total="$root_total" 'BEGIN { printf "%.2f", (used / total) * 100 }')
 fi
 
-# Last login and Uptime
-last_login_line=$(lastlog -u "$USER" | awk 'NR==2')
-if echo "$last_login_line" | grep -q "Never logged in"; then
-    last_login_time="Never logged in"
-    last_login_ip=""
+# Last login and Uptime. Ubuntu 26.04 uses lastlog2 instead of lastlog.
+if command -v lastlog2 >/dev/null 2>&1; then
+  last_login_command=(lastlog2 -u "$USER")
+elif command -v lastlog >/dev/null 2>&1; then
+  last_login_command=(lastlog -u "$USER")
 else
-    last_login_ip=$(echo "$last_login_line" | awk '{print $3}')
-    last_login_time=$(echo "$last_login_line" | awk '{$1=$2=$3=""; sub(/^ +/, ""); print}')
+  last_login_command=()
+fi
+
+if [ "${#last_login_command[@]}" -gt 0 ]; then
+  last_login_line="$("${last_login_command[@]}" | awk 'NR==2')"
+  if echo "$last_login_line" | grep -q "Never logged in"; then
+      last_login_time="Never logged in"
+      last_login_ip=""
+  else
+      last_login_ip=$(echo "$last_login_line" | awk '{print $3}')
+      last_login_time=$(echo "$last_login_line" | awk '{$1=$2=$3=""; sub(/^ +/, ""); print}')
+  fi
+else
+  last_login_time="Not available"
+  last_login_ip=""
 fi
 
 if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$last_login_ip" == *:* ]]; then
