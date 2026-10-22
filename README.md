@@ -50,7 +50,8 @@ process listings. Use a short-lived, appropriately scoped key.
 - Disables root SSH login and password authentication
 - Creates the admin user with root's authorized SSH key
 - Enables passwordless sudo and Docker access for the admin user
-- Installs Docker, Compose, UFW, Fail2ban, Git, curl, mise, and `lastlog2`
+- Installs Docker, Compose, UFW, Fail2ban, Git, curl, mise, and `lastlog2` where
+  the release packages it
 - Sets the system hostname
 - Installs the machine report at `/usr/local/bin/machine_report.sh` and in the admin user's home directory
 - Removes Ubuntu's standard MOTD and separate SSH `Last login` output

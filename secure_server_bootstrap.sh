@@ -192,7 +192,11 @@ fi
 dpkg --configure -a || apt-get -f install -y
 apt-get -f install -y
 apt-get -y upgrade
-apt-get install -y sudo ufw fail2ban docker.io docker-compose-v2 curl git lastlog2
+apt-get install -y sudo ufw fail2ban docker.io docker-compose-v2 curl git
+# lastlog2 is packaged from Ubuntu 25.04; 24.04 has no candidate.
+if apt-cache show lastlog2 >/dev/null 2>&1; then
+  apt-get install -y lastlog2
+fi
 systemctl enable --now docker
 
 if [ "$TAILSCALE_SETUP" = "yes" ]; then
@@ -291,7 +295,9 @@ fi
 
 echo "[SSH] Hardening SSH configuration..."
 install -d -m 755 /etc/ssh/sshd_config.d
-cat >/etc/ssh/sshd_config.d/99-hardening.conf <<SSHCONF
+# sshd keeps the first value it reads, and drop-ins load in name order, so
+# 00- wins over image files such as 50-cloud-init.conf.
+cat >/etc/ssh/sshd_config.d/00-hardening.conf <<SSHCONF
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -351,7 +357,7 @@ fi
 
 echo "[4/4] Verifying root SSH is blocked..."
 if ssh "${SSH_OPTIONS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$SSH_PORT" root@"$HOST" "whoami" >/dev/null 2>&1; then
-  echo "WARNING: root SSH still appears enabled. Check /etc/ssh/sshd_config.d/99-hardening.conf" >&2
+  echo "WARNING: root SSH still appears enabled. Check /etc/ssh/sshd_config.d/00-hardening.conf" >&2
 else
   echo "Root SSH is blocked (expected)."
 fi
