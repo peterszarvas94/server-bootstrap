@@ -8,7 +8,7 @@ Tailscale, and installs the machine report shown on interactive login.
 
 - A clean Ubuntu server
 - SSH access as `root`
-- Root's `/root/.ssh/authorized_keys` must exist
+- Root's `/root/.ssh/authorized_keys` must contain a valid public key whose private key is available locally (directly or through an SSH agent)
 - The new admin username must not already exist
 
 The script is not intended for already configured or partially configured
@@ -57,6 +57,16 @@ process listings. Use a short-lived, appropriately scoped key.
 - Removes Ubuntu's standard MOTD and separate SSH `Last login` output
 - Allows incoming TCP ports `22`, `80`, and `443`
 - If Tailscale is enabled, allows SSH through `tailscale0` as well
+
+## Login Safety
+
+Bootstrap aborts before making server changes if root's authorized keys contain
+no valid public key. After creating the admin, it checks a fresh public-key-only
+SSH connection and passwordless sudo before disabling root/password access or
+changing the firewall. If this check fails, existing SSH access remains enabled.
+It checks admin access again after hardening and before rebooting, and once more
+after reboot. SSH connection sharing is disabled so these checks cannot reuse
+the initial root session.
 
 ## SSH Host Keys
 

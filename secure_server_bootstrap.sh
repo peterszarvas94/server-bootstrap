@@ -107,9 +107,17 @@ fi
 MACHINE_REPORT_SCRIPT_B64="$(base64 -w 0 "$MACHINE_REPORT_SCRIPT_PATH")"
 TAILSCALE_AUTH_KEY_B64="$(printf '%s' "$TAILSCALE_AUTH_KEY" | base64 -w 0)"
 
-echo "[1/4] Connecting as root on $HOST:$SSH_PORT..."
+echo "[1/6] Connecting as root on $HOST:$SSH_PORT..."
 
-SSH_OPTIONS=(-o StrictHostKeyChecking=accept-new)
+SSH_OPTIONS=(-o StrictHostKeyChecking=accept-new -o ControlMaster=no -o ControlPath=none)
+ADMIN_SSH_OPTIONS=("${SSH_OPTIONS[@]}" -o BatchMode=yes -o PreferredAuthentications=publickey -o ConnectTimeout=10)
+
+verify_admin_login() {
+  if ! ssh "${ADMIN_SSH_OPTIONS[@]}" -p "$SSH_PORT" "$ADMIN_USER@$HOST" 'sudo -n true'; then
+    echo "ERROR: Admin key login or passwordless sudo failed. Stopping without reboot." >&2
+    return 1
+  fi
+}
 
 remove_known_hosts_entries() {
   for ssh_host in "$HOST" "$TARGET_HOSTNAME"; do
@@ -145,9 +153,9 @@ else
   exit 1
 fi
 
-# Check for root's authorized_keys before making changes.
-if [ ! -f /root/.ssh/authorized_keys ]; then
-  echo "ERROR: /root/.ssh/authorized_keys does not exist" >&2
+# Require a usable public key, not just an existing (possibly empty) file.
+if [ ! -s /root/.ssh/authorized_keys ] || ! ssh-keygen -l -f /root/.ssh/authorized_keys >/dev/null 2>&1; then
+  echo "ERROR: /root/.ssh/authorized_keys must contain a valid public key" >&2
   echo "Cannot copy SSH keys to the new admin user. Aborting." >&2
   exit 1
 fi
@@ -233,7 +241,7 @@ touch "/home/$ADMIN_USER/.ssh/authorized_keys"
 chown "$ADMIN_USER:$ADMIN_USER" "/home/$ADMIN_USER/.ssh/authorized_keys"
 chmod 600 "/home/$ADMIN_USER/.ssh/authorized_keys"
 
-# Copy root's authorized_keys (already verified it exists).
+# Copy root's authorized_keys (already checked for a valid public key).
 cat /root/.ssh/authorized_keys >> "/home/$ADMIN_USER/.ssh/authorized_keys"
 sort -u "/home/$ADMIN_USER/.ssh/authorized_keys" -o "/home/$ADMIN_USER/.ssh/authorized_keys"
 
@@ -293,6 +301,24 @@ if grep -Eq '^[[:space:]]*session[[:space:]]+.*pam_lastlog\.so' /etc/pam.d/sshd;
   sed -i -E '/^[[:space:]]*session[[:space:]]+.*pam_lastlog\.so/ s/^/# Disabled by server bootstrap: /' /etc/pam.d/sshd
 fi
 
+EOF
+
+echo "[2/6] Verifying fresh admin key login before disabling root/password access..."
+verify_admin_login
+
+echo "[3/6] Applying SSH hardening and firewall rules as the verified admin..."
+ssh "${ADMIN_SSH_OPTIONS[@]}" -p "$SSH_PORT" "$ADMIN_USER@$HOST" \
+  "sudo -n env SSH_PORT=$SSH_PORT TAILSCALE_SETUP=$TAILSCALE_SETUP bash -s" <<'EOF'
+set -euo pipefail
+if systemctl is-active --quiet ssh; then
+  SSH_SERVICE=ssh
+elif systemctl is-active --quiet sshd; then
+  SSH_SERVICE=sshd
+else
+  echo "ERROR: SSH service is not running" >&2
+  exit 1
+fi
+
 echo "[SSH] Hardening SSH configuration..."
 install -d -m 755 /etc/ssh/sshd_config.d
 # sshd keeps the first value it reads, and drop-ins load in name order, so
@@ -337,31 +363,28 @@ ufw --force enable
 
 systemctl enable --now fail2ban
 
-echo "[Bootstrap] Server bootstrap complete. Rebooting in 5 seconds..."
-sleep 5
-reboot
 EOF
 
-echo "[2/4] Server is rebooting to apply all changes..."
+echo "[4/6] Verifying admin access with hardened SSH and firewall before reboot..."
+verify_admin_login
+ssh "${ADMIN_SSH_OPTIONS[@]}" -p "$SSH_PORT" "$ADMIN_USER@$HOST" 'sudo -n reboot'
+
+echo "[5/6] Server is rebooting to apply all changes..."
 echo "Waiting 30 seconds for server to restart..."
 sleep 30
 
 # Package upgrades or a rebuilt image may have generated a new host key.
 remove_known_hosts_entries
 
-echo "[3/4] Verifying SSH access as '$ADMIN_USER'..."
-if ! ssh "${SSH_OPTIONS[@]}" -o BatchMode=yes -o ConnectTimeout=10 -p "$SSH_PORT" "$ADMIN_USER@$HOST" "whoami" >/dev/null 2>&1; then
-  echo "Failed to verify SSH login for $ADMIN_USER. Check key/agent and try: ssh -p $SSH_PORT $ADMIN_USER@$HOST" >&2
-  exit 1
-fi
+echo "[6/6] Verifying SSH access after reboot..."
+verify_admin_login
 
-echo "[4/4] Verifying root SSH is blocked..."
+echo "Verifying root SSH is blocked..."
 if ssh "${SSH_OPTIONS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$SSH_PORT" root@"$HOST" "whoami" >/dev/null 2>&1; then
   echo "WARNING: root SSH still appears enabled. Check /etc/ssh/sshd_config.d/00-hardening.conf" >&2
 else
   echo "Root SSH is blocked (expected)."
 fi
 
-echo "[5/5] Done."
 echo "Bootstrap complete! Server is secured and ready."
 echo "You can now use: ssh -p $SSH_PORT $ADMIN_USER@$HOST"
