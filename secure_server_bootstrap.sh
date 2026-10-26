@@ -200,10 +200,32 @@ fi
 dpkg --configure -a || apt-get -f install -y
 apt-get -f install -y
 apt-get -y upgrade
-apt-get install -y sudo ufw fail2ban docker.io docker-compose-v2 curl git
-# lastlog2 is packaged from Ubuntu 25.04; 24.04 has no candidate.
-if apt-cache show lastlog2 >/dev/null 2>&1; then
+packages=(sudo ufw fail2ban curl git)
+if command -v docker >/dev/null 2>&1; then
+  echo "[Docker] Already installed ($(docker --version)). Skipping docker.io."
+else
+  echo "[Docker] Installing Docker Engine..."
+  packages+=(docker.io)
+fi
+if docker compose version >/dev/null 2>&1; then
+  echo "[Docker] Docker Compose is already available. Skipping docker-compose-v2."
+else
+  echo "[Docker] Installing Docker Compose..."
+  packages+=(docker-compose-v2)
+fi
+apt-get install -y "${packages[@]}"
+# lastlog2 is packaged from Ubuntu 25.04. On 24.04 apt-cache show still
+# succeeds because another package mentions the name, but there is no
+# installable candidate.
+lastlog2_candidate="$(apt-cache policy lastlog2 2>/dev/null | awk '/^  Candidate:/ { print $2; exit }')"
+if [ -n "$lastlog2_candidate" ] && [ "$lastlog2_candidate" != "(none)" ]; then
   apt-get install -y lastlog2
+else
+  echo "[Packages] lastlog2 has no installable candidate. Skipping."
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "ERROR: Docker is not installed." >&2
+  exit 1
 fi
 systemctl enable --now docker
 
