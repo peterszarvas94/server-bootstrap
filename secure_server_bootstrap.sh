@@ -200,10 +200,27 @@ fi
 dpkg --configure -a || apt-get -f install -y
 apt-get -f install -y
 apt-get -y upgrade
-apt-get install -y sudo ufw fail2ban docker.io docker-compose-v2 curl git
+packages=(sudo ufw fail2ban curl git)
+if command -v docker >/dev/null 2>&1; then
+  echo "[Docker] Already installed ($(docker --version)). Skipping docker.io."
+else
+  echo "[Docker] Installing Docker Engine..."
+  packages+=(docker.io)
+fi
+if docker compose version >/dev/null 2>&1; then
+  echo "[Docker] Docker Compose is already available. Skipping docker-compose-v2."
+else
+  echo "[Docker] Installing Docker Compose..."
+  packages+=(docker-compose-v2)
+fi
+apt-get install -y "${packages[@]}"
 # lastlog2 is packaged from Ubuntu 25.04; 24.04 has no candidate.
 if apt-cache show lastlog2 >/dev/null 2>&1; then
   apt-get install -y lastlog2
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "ERROR: Docker is not installed." >&2
+  exit 1
 fi
 systemctl enable --now docker
 
