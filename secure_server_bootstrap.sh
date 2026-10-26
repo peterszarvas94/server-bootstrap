@@ -214,9 +214,14 @@ else
   packages+=(docker-compose-v2)
 fi
 apt-get install -y "${packages[@]}"
-# lastlog2 is packaged from Ubuntu 25.04; 24.04 has no candidate.
-if apt-cache show lastlog2 >/dev/null 2>&1; then
+# lastlog2 is packaged from Ubuntu 25.04. On 24.04 apt-cache show still
+# succeeds because another package mentions the name, but there is no
+# installable candidate.
+lastlog2_candidate="$(apt-cache policy lastlog2 2>/dev/null | awk '/^  Candidate:/ { print $2; exit }')"
+if [ -n "$lastlog2_candidate" ] && [ "$lastlog2_candidate" != "(none)" ]; then
   apt-get install -y lastlog2
+else
+  echo "[Packages] lastlog2 has no installable candidate. Skipping."
 fi
 if ! command -v docker >/dev/null 2>&1; then
   echo "ERROR: Docker is not installed." >&2
